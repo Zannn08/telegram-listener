@@ -32,19 +32,23 @@ async def init_db() -> None:
     
     logger.info("Initializing database connection...")
     
+    # Get the async-compatible database URL
+    db_url = settings.async_database_url
+    logger.info(f"Using database: {'SQLite' if 'sqlite' in db_url else 'PostgreSQL'}")
+    
     # Create async engine with appropriate settings based on database type
-    is_sqlite = settings.database_url.startswith("sqlite")
+    is_sqlite = db_url.startswith("sqlite")
     
     if is_sqlite:
         # SQLite doesn't support connection pooling
         _engine = create_async_engine(
-            settings.database_url,
+            db_url,
             echo=False,
         )
     else:
         # PostgreSQL with connection pooling
         _engine = create_async_engine(
-            settings.database_url,
+            db_url,
             echo=False,
             pool_size=5,
             max_overflow=10,

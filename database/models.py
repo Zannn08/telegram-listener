@@ -6,8 +6,8 @@ from datetime import datetime
 from typing import Optional
 import uuid
 
-from sqlalchemy import String, Integer, Boolean, DateTime, Text, Index
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import String, Integer, Boolean, DateTime, Text, Index, ForeignKey, UniqueConstraint
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -269,5 +269,52 @@ class TrackedChannel(Base):
             "successful_calls": self.successful_calls,
             "is_active": self.is_active,
             "created_at": self.created_at.isoformat(),
+        }
+
+
+class UserSubscription(Base):
+    """
+    Represents a user's subscription to a Telegram channel.
+    Enables per-user channel tracking with reference counting.
+    """
+    
+    __tablename__ = "user_subscriptions"
+    
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=generate_uuid
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        index=True
+    )
+    channel_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("tracked_channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    subscribed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow
+    )
+    
+    # Unique constraint: one subscription per user per channel
+    __table_args__ = (
+        UniqueConstraint('user_id', 'channel_id', name='uq_user_channel'),
+        Index("idx_subscriptions_user", "user_id"),
+        Index("idx_subscriptions_channel", "channel_id"),
+    )
+    
+    def to_dict(self) -> dict:
+        """Convert model to dictionary for API responses."""
+        return {
+            "id": str(self.id),
+            "user_id": self.user_id,
+            "channel_id": self.channel_id,
+            "subscribed_at": self.subscribed_at.isoformat() + "Z",
         }
 

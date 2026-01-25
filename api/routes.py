@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 
 from database.connection import get_db_session
-from database.repository import ContractRepository, ChannelRepository, AlertRepository
+from database.repository import ContractRepository, ChannelRepository, AlertRepository, SubscriptionRepository
 from listener.telegram_client import TelegramListener
 from utils.logger import get_logger
 
@@ -140,6 +140,44 @@ class AddContractResponse(BaseModel):
     data: Optional[ContractResponse] = None
 
 
+# Subscription models
+class SubscriptionResponse(BaseModel):
+    """Response model for a subscription."""
+    id: str
+    user_id: str
+    channel_id: str
+    channel_username: str
+    subscribed_at: str
+
+
+class SubscriptionListResponse(BaseModel):
+    """Response model for subscription list."""
+    success: bool = True
+    data: List[SubscriptionResponse]
+    count: int
+
+
+class SubscribeRequest(BaseModel):
+    """Request model for subscribing to a channel."""
+    user_id: str = Field(..., min_length=1, max_length=255)
+    channel_username: str = Field(..., min_length=1, max_length=255)
+
+
+class SubscribeResponse(BaseModel):
+    """Response model for subscribe action."""
+    success: bool = True
+    message: str = ""
+    channel_joined: bool = False  # True if Telegram channel was newly joined
+    data: Optional[SubscriptionResponse] = None
+
+
+class UnsubscribeResponse(BaseModel):
+    """Response model for unsubscribe action."""
+    success: bool = True
+    message: str = ""
+    channel_left: bool = False  # True if Telegram channel was left (no more subscribers)
+
+
 # Routes
 @router.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
@@ -154,17 +192,39 @@ async def health_check():
 @router.get("/api/ca/latest", response_model=ContractListResponse, tags=["Contracts"])
 async def get_latest_contracts(
     limit: int = Query(default=50, ge=1, le=200, description="Number of contracts to return"),
+    user_id: Optional[str] = Query(default=None, description="User ID to filter by subscribed channels"),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
     Get the latest detected contract addresses.
     
     Returns contracts sorted by first_seen_at descending.
-    Only includes CALL-classified contracts.
+    If user_id is provided, only returns contracts from channels the user is subscribed to.
     """
     try:
         repo = ContractRepository(session)
         contracts = await repo.get_latest(limit=limit)
+        
+        # Filter by user subscriptions if user_id provided
+        if user_id:
+            sub_repo = SubscriptionRepository(session)
+            subscribed_channels = await sub_repo.get_user_channel_usernames(user_id)
+            
+            if subscribed_channels:
+                # Filter contracts to only those from subscribed channels
+                contracts = [
+                    c for c in contracts 
+                    if c.first_source_channel in subscribed_channels
+                ]
+                logger.info(f"Filtered to {len(contracts)} contracts for user {user_id[:20]}... ({len(subscribed_channels)} channels)")
+            else:
+                # User has no subscriptions - return empty list
+                logger.info(f"User {user_id[:20]}... has no subscriptions, returning empty list")
+                return ContractListResponse(
+                    success=True,
+                    data=[],
+                    count=0,
+                )
         
         data = [ContractResponse(**c.to_dict()) for c in contracts]
         
@@ -516,4 +576,194 @@ async def mark_all_alerts_read(
             success=False,
             message=str(e),
         )
+
+
+# ============ SUBSCRIPTION ENDPOINTS ============
+
+@router.post("/api/subscriptions", response_model=SubscribeResponse, tags=["Subscriptions"])
+async def subscribe_to_channel(
+    request: SubscribeRequest,
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Subscribe a user to a Telegram channel.
+    
+    If the channel is new, it will be created and the Telegram listener will join it.
+    If the channel already exists, just add the user subscription.
+    """
+    try:
+        username = request.channel_username.lstrip('@').strip()
+        
+        if not username:
+            return SubscribeResponse(
+                success=False,
+                message="Channel username cannot be empty",
+            )
+        
+        channel_repo = ChannelRepository(session)
+        sub_repo = SubscriptionRepository(session)
+        
+        # Check if channel exists
+        channel = await channel_repo.get_by_username(username)
+        channel_joined = False
+        
+        if channel is None:
+            # New channel - create it and join Telegram
+            channel = await channel_repo.get_or_create(username)
+            
+            # Try to join the Telegram channel
+            listener = TelegramListener.get_instance()
+            if listener and listener.client:
+                try:
+                    joined = await listener.join_channel(username)
+                    if joined:
+                        channel_joined = True
+                        logger.info(f"Joined Telegram channel: @{username}")
+                except Exception as e:
+                    logger.warning(f"Could not join Telegram channel @{username}: {e}")
+            else:
+                logger.warning(f"Telegram listener not available, channel @{username} added to DB only")
+        
+        # Create subscription
+        subscription = await sub_repo.subscribe(request.user_id, channel.id)
+        await session.commit()
+        
+        return SubscribeResponse(
+            success=True,
+            message=f"Subscribed to @{username}" + (" (joined Telegram)" if channel_joined else ""),
+            channel_joined=channel_joined,
+            data=SubscriptionResponse(
+                id=subscription.id,
+                user_id=subscription.user_id,
+                channel_id=subscription.channel_id,
+                channel_username=username,
+                subscribed_at=subscription.subscribed_at.isoformat() + "Z",
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Error subscribing to channel: {e}")
+        return SubscribeResponse(
+            success=False,
+            message=str(e),
+        )
+
+
+@router.delete("/api/subscriptions/{channel_username}", response_model=UnsubscribeResponse, tags=["Subscriptions"])
+async def unsubscribe_from_channel(
+    channel_username: str,
+    user_id: str = Query(..., description="User ID to unsubscribe"),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Unsubscribe a user from a Telegram channel.
+    
+    If this is the last subscriber, the channel will be deleted and Telegram listener will leave.
+    """
+    try:
+        username = channel_username.lstrip('@').strip()
+        
+        if not username:
+            return UnsubscribeResponse(
+                success=False,
+                message="Channel username cannot be empty",
+            )
+        
+        channel_repo = ChannelRepository(session)
+        sub_repo = SubscriptionRepository(session)
+        
+        # Get channel
+        channel = await channel_repo.get_by_username(username)
+        if channel is None:
+            return UnsubscribeResponse(
+                success=False,
+                message=f"Channel @{username} not found",
+            )
+        
+        # Remove subscription
+        unsubscribed = await sub_repo.unsubscribe(user_id, channel.id)
+        
+        if not unsubscribed:
+            return UnsubscribeResponse(
+                success=False,
+                message="Subscription not found",
+            )
+        
+        # Check if any subscribers remain
+        subscriber_count = await sub_repo.get_subscriber_count(channel.id)
+        channel_left = False
+        
+        if subscriber_count == 0:
+            # No more subscribers - leave Telegram and delete channel
+            listener = TelegramListener.get_instance()
+            if listener and listener.client:
+                try:
+                    left = await listener.leave_channel(username)
+                    if left:
+                        channel_left = True
+                        logger.info(f"Left Telegram channel: @{username}")
+                except Exception as e:
+                    logger.warning(f"Could not leave Telegram channel @{username}: {e}")
+            
+            # Delete channel from database
+            await channel_repo.delete_by_username(username)
+        
+        await session.commit()
+        
+        return UnsubscribeResponse(
+            success=True,
+            message=f"Unsubscribed from @{username}" + (" (left Telegram)" if channel_left else ""),
+            channel_left=channel_left,
+        )
+    except Exception as e:
+        logger.error(f"Error unsubscribing from channel: {e}")
+        return UnsubscribeResponse(
+            success=False,
+            message=str(e),
+        )
+
+
+@router.get("/api/subscriptions", response_model=SubscriptionListResponse, tags=["Subscriptions"])
+async def get_user_subscriptions(
+    user_id: str = Query(..., description="User ID to get subscriptions for"),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Get all channel subscriptions for a user.
+    """
+    try:
+        sub_repo = SubscriptionRepository(session)
+        channels = await sub_repo.get_user_channels(user_id)
+        
+        # Build response with channel usernames
+        from sqlalchemy import select
+        from database.models import UserSubscription
+        
+        result = await session.execute(
+            select(UserSubscription).where(UserSubscription.user_id == user_id)
+        )
+        subscriptions = list(result.scalars().all())
+        
+        # Map channel_id to username
+        channel_map = {ch.id: ch.username for ch in channels}
+        
+        data = [
+            SubscriptionResponse(
+                id=sub.id,
+                user_id=sub.user_id,
+                channel_id=sub.channel_id,
+                channel_username=channel_map.get(sub.channel_id, "unknown"),
+                subscribed_at=sub.subscribed_at.isoformat() + "Z",
+            )
+            for sub in subscriptions
+            if sub.channel_id in channel_map
+        ]
+        
+        return SubscriptionListResponse(
+            success=True,
+            data=data,
+            count=len(data),
+        )
+    except Exception as e:
+        logger.error(f"Error fetching subscriptions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 

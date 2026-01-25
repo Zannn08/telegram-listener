@@ -7,6 +7,7 @@ from typing import Callable, List, Optional
 
 from telethon import TelegramClient, events
 from telethon.tl.types import Channel, Message
+from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
 
 from config import settings
 from utils.logger import get_logger
@@ -89,6 +90,85 @@ class TelegramListener:
                 return False
         except Exception as e:
             logger.error(f"Failed to add channel @{username}: {e}")
+            return False
+    
+    async def join_channel(self, username: str) -> bool:
+        """
+        Join a public Telegram channel.
+        
+        Args:
+            username: Channel username (without @)
+            
+        Returns:
+            True if successfully joined, False otherwise
+        """
+        if not self.client:
+            logger.warning("Cannot join channel - client not connected")
+            return False
+        
+        username = username.lstrip('@').strip()
+        
+        try:
+            # Get the channel entity first
+            entity = await self.client.get_entity(username)
+            
+            if isinstance(entity, Channel):
+                # Join the channel
+                await self.client(JoinChannelRequest(entity))
+                logger.info(f"✓ Joined Telegram channel: @{username}")
+                
+                # Also add to our listening list
+                await self.add_channel(username)
+                
+                return True
+            else:
+                logger.warning(f"Entity @{username} is not a channel")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to join channel @{username}: {e}")
+            return False
+    
+    async def leave_channel(self, username: str) -> bool:
+        """
+        Leave a Telegram channel.
+        
+        Args:
+            username: Channel username (without @)
+            
+        Returns:
+            True if successfully left, False otherwise
+        """
+        if not self.client:
+            logger.warning("Cannot leave channel - client not connected")
+            return False
+        
+        username = username.lstrip('@').strip()
+        
+        try:
+            # Get the channel entity first
+            entity = await self.client.get_entity(username)
+            
+            if isinstance(entity, Channel):
+                # Leave the channel
+                await self.client(LeaveChannelRequest(entity))
+                logger.info(f"✓ Left Telegram channel: @{username}")
+                
+                # Remove from our listening list
+                if username in self.channels:
+                    self.channels.remove(username)
+                
+                # Remove from resolved channels
+                self._resolved_channels = [
+                    ch for ch in self._resolved_channels 
+                    if getattr(ch, 'username', '').lower() != username.lower()
+                ]
+                
+                return True
+            else:
+                logger.warning(f"Entity @{username} is not a channel")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to leave channel @{username}: {e}")
             return False
     
     async def connect(self) -> None:

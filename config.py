@@ -37,6 +37,23 @@ class Settings(BaseSettings):
         description="Database connection string"
     )
     
+    @property
+    def async_database_url(self) -> str:
+        """
+        Convert database URL to async format.
+        Render provides postgres:// but SQLAlchemy async needs postgresql+asyncpg://
+        """
+        url = self.database_url
+        
+        # Handle Render's postgres:// format
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+        elif url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        # SQLite already has the right format (sqlite+aiosqlite://)
+        
+        return url
+    
     # Channels (comma-separated in env, parsed to list)
     channels: str = Field(default="", description="Comma-separated channel usernames")
     

@@ -9,7 +9,7 @@ import uuid
 from sqlalchemy import select, update, desc, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import TrackedContract, TrackedChannel, PriceAlert
+from .models import TrackedContract, TrackedChannel, PriceAlert, UserSubscription
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -427,3 +427,158 @@ class AlertRepository:
         )
         return list(result.scalars().all())
 
+
+class SubscriptionRepository:
+    """Repository for UserSubscription operations."""
+    
+    def __init__(self, session: AsyncSession):
+        self.session = session
+    
+    async def subscribe(self, user_id: str, channel_id: str) -> UserSubscription:
+        """
+        Create a subscription for a user to a channel.
+        
+        Args:
+            user_id: User identifier (email or ID)
+            channel_id: Channel ID from tracked_channels
+            
+        Returns:
+            UserSubscription
+        """
+        # Check if already subscribed
+        existing = await self.get_subscription(user_id, channel_id)
+        if existing:
+            return existing
+        
+        subscription = UserSubscription(
+            user_id=user_id,
+            channel_id=channel_id,
+        )
+        
+        self.session.add(subscription)
+        await self.session.flush()
+        
+        logger.info(f"User {user_id[:20]}... subscribed to channel {channel_id[:8]}...")
+        
+        return subscription
+    
+    async def unsubscribe(self, user_id: str, channel_id: str) -> bool:
+        """
+        Remove a subscription for a user from a channel.
+        
+        Args:
+            user_id: User identifier
+            channel_id: Channel ID
+            
+        Returns:
+            True if unsubscribed, False if not found
+        """
+        result = await self.session.execute(
+            delete(UserSubscription).where(
+                UserSubscription.user_id == user_id,
+                UserSubscription.channel_id == channel_id
+            )
+        )
+        
+        if result.rowcount > 0:
+            logger.info(f"User {user_id[:20]}... unsubscribed from channel {channel_id[:8]}...")
+            return True
+        return False
+    
+    async def get_subscription(self, user_id: str, channel_id: str) -> Optional[UserSubscription]:
+        """
+        Get a specific subscription.
+        
+        Args:
+            user_id: User identifier
+            channel_id: Channel ID
+            
+        Returns:
+            UserSubscription if found, None otherwise
+        """
+        result = await self.session.execute(
+            select(UserSubscription).where(
+                UserSubscription.user_id == user_id,
+                UserSubscription.channel_id == channel_id
+            )
+        )
+        return result.scalar_one_or_none()
+    
+    async def is_subscribed(self, user_id: str, channel_id: str) -> bool:
+        """
+        Check if a user is subscribed to a channel.
+        
+        Args:
+            user_id: User identifier
+            channel_id: Channel ID
+            
+        Returns:
+            True if subscribed, False otherwise
+        """
+        subscription = await self.get_subscription(user_id, channel_id)
+        return subscription is not None
+    
+    async def get_subscriber_count(self, channel_id: str) -> int:
+        """
+        Count the number of subscribers for a channel.
+        
+        Args:
+            channel_id: Channel ID
+            
+        Returns:
+            Number of subscribers
+        """
+        from sqlalchemy import func
+        result = await self.session.execute(
+            select(func.count(UserSubscription.id)).where(
+                UserSubscription.channel_id == channel_id
+            )
+        )
+        return result.scalar() or 0
+    
+    async def get_user_channels(self, user_id: str) -> List[TrackedChannel]:
+        """
+        Get all channels a user is subscribed to.
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            List of TrackedChannel
+        """
+        result = await self.session.execute(
+            select(TrackedChannel)
+            .join(UserSubscription, UserSubscription.channel_id == TrackedChannel.id)
+            .where(UserSubscription.user_id == user_id)
+        )
+        return list(result.scalars().all())
+    
+    async def get_user_channel_usernames(self, user_id: str) -> List[str]:
+        """
+        Get usernames of all channels a user is subscribed to.
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            List of channel usernames
+        """
+        channels = await self.get_user_channels(user_id)
+        return [ch.username for ch in channels]
+    
+    async def delete_all_for_channel(self, channel_id: str) -> int:
+        """
+        Delete all subscriptions for a channel.
+        
+        Args:
+            channel_id: Channel ID
+            
+        Returns:
+            Number of subscriptions deleted
+        """
+        result = await self.session.execute(
+            delete(UserSubscription).where(
+                UserSubscription.channel_id == channel_id
+            )
+        )
+        return result.rowcount

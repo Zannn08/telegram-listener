@@ -4,6 +4,8 @@ uvicorn
 
 # Database
 sqlalchemy
+asyncpg
+psycopg2-binary
 aiosqlite
 
 # HTTP Client
