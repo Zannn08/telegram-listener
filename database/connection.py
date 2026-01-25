@@ -2,6 +2,7 @@
 Async database connection management.
 """
 
+import ssl
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -46,13 +47,19 @@ async def init_db() -> None:
             echo=False,
         )
     else:
-        # PostgreSQL with connection pooling
+        # PostgreSQL with connection pooling and SSL
+        # Create SSL context for secure connection to Render PostgreSQL
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE  # Render uses self-signed certs
+        
         _engine = create_async_engine(
             db_url,
             echo=False,
             pool_size=5,
             max_overflow=10,
             pool_pre_ping=True,
+            connect_args={"ssl": ssl_context},
         )
     
     # Create session factory
