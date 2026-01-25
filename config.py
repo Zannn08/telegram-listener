@@ -42,14 +42,25 @@ class Settings(BaseSettings):
         """
         Convert database URL to async format.
         Render provides postgres:// but SQLAlchemy async needs postgresql+asyncpg://
+        Also adds SSL requirement for Render PostgreSQL.
         """
         url = self.database_url
         
         # Handle Render's postgres:// format
         if url.startswith("postgres://"):
             url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+            # Add SSL requirement for Render PostgreSQL
+            if "?" in url:
+                url += "&ssl=require"
+            else:
+                url += "?ssl=require"
         elif url.startswith("postgresql://"):
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            # Add SSL requirement for Render PostgreSQL
+            if "?" in url:
+                url += "&ssl=require"
+            else:
+                url += "?ssl=require"
         # SQLite already has the right format (sqlite+aiosqlite://)
         
         return url
